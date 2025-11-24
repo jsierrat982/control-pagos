@@ -1,5 +1,14 @@
 [
   {
+    "id": 1764027148827,
+    "beneficiary": "Isabella",
+    "amount": 150000,
+    "description": "Noviembre",
+    "date": "2025-08-20",
+    "image": null,
+    "imagePath": "evidencias/1764027147374_Voley_Girl_01.png"
+  },
+  {
     "id": 1764026627086,
     "beneficiary": "Maria Victoria",
     "amount": 250000,
