@@ -71,31 +71,44 @@
                 return await response.json();
             },
 
-            async getFile(token, owner, repo, path) {
+            // Leer JSON (Base de datos)
+            async getJsonFile(token, owner, repo, path) {
                 try {
                     const response = await fetch(`${GITHUB_API_URL}/repos/${owner}/${repo}/contents/${path}`, {
                         headers: { Authorization: `token ${token}` }
                     });
-                    if (response.status === 404) return null; // Archivo no existe
+                    if (response.status === 404) return null;
                     if (!response.ok) throw new Error("Error al leer archivo");
                     const data = await response.json();
-                    // Decodificar contenido base64 (soporta caracteres especiales)
                     const content = decodeURIComponent(escape(atob(data.content)));
                     return { content: JSON.parse(content), sha: data.sha };
                 } catch (e) {
-                    console.error("Get file error", e);
+                    console.error("Get json error", e);
                     return null;
                 }
             },
 
+            // Leer Imagen (Evidencia) - Nueva función
+            async getImage(token, owner, repo, path) {
+                try {
+                    const response = await fetch(`${GITHUB_API_URL}/repos/${owner}/${repo}/contents/${path}`, {
+                        headers: { Authorization: `token ${token}` }
+                    });
+                    if (!response.ok) throw new Error("No se pudo cargar la imagen");
+                    const data = await response.json();
+                    // data.content viene en base64 con saltos de línea (\n), hay que limpiarlos
+                    const cleanBase64 = data.content.replace(/\n/g, '');
+                    // Asumimos jpeg/png genérico para visualizar
+                    return `data:image/jpeg;base64,${cleanBase64}`; 
+                } catch (e) {
+                    console.error("Get image error", e);
+                    throw e;
+                }
+            },
+
             async uploadFile(token, owner, repo, path, content, message, sha = null) {
-                // Convertir contenido a Base64 de forma segura para UTF-8
                 const contentBase64 = btoa(unescape(encodeURIComponent(content)));
-                
-                const body = {
-                    message: message,
-                    content: contentBase64
-                };
+                const body = { message, content: contentBase64 };
                 if (sha) body.sha = sha;
 
                 const response = await fetch(`${GITHUB_API_URL}/repos/${owner}/${repo}/contents/${path}`, {
@@ -144,6 +157,7 @@
             const [viewImage, setViewImage] = useState(null);
             const [searchTerm, setSearchTerm] = useState('');
             const [loading, setLoading] = useState(false);
+            const [imageLoading, setImageLoading] = useState(false); // Nuevo estado para carga de imágenes
             const [statusMsg, setStatusMsg] = useState('');
             
             // Configuración GitHub
@@ -168,10 +182,9 @@
                     setGhConfigInput(parsed);
                     syncFromGithub(parsed);
                 } else {
-                    // Fallback local
                     const savedData = localStorage.getItem('paymentData'); 
                     if (savedData) setTransactions(JSON.parse(savedData));
-                    setIsSettingsOpen(true); // Abrir config si no hay token
+                    setIsSettingsOpen(true);
                 }
             }, []);
 
@@ -192,11 +205,11 @@
                 setLoading(true);
                 setStatusMsg('Sincronizando...');
                 try {
-                    const data = await GithubService.getFile(config.token, config.owner, config.repo, 'db/pagos.json');
+                    const data = await GithubService.getJsonFile(config.token, config.owner, config.repo, 'db/pagos.json');
                     if (data && data.content) {
                         setTransactions(data.content);
                         localStorage.setItem('paymentData', JSON.stringify(data.content));
-                        localStorage.setItem('dbSha', data.sha); // Guardar SHA para updates
+                        localStorage.setItem('dbSha', data.sha); 
                     }
                     setStatusMsg('Actualizado');
                     setTimeout(() => setStatusMsg(''), 2000);
@@ -218,11 +231,8 @@
 
                 try {
                     // 1. Si hay imagen nueva, subirla a evidencias/
-                    let imageUrl = formData.image; // Mantener base64 local si falla o por defecto
                     if (imageFile) {
                         setStatusMsg('Subiendo evidencia...');
-                        // Subimos el archivo raw (lectura como texto base64 ya hecha en handleFileChange)
-                        // Para simplificar en HTML único, usaremos el mismo Base64 DataURL pero quitando el header
                         const base64Content = imageFile.split(',')[1]; 
                         const path = `evidencias/${imageName}`;
                         
@@ -231,26 +241,19 @@
                             ghConfig.owner, 
                             ghConfig.repo, 
                             path, 
-                            atob(base64Content), // Decodificar para que uploadFile lo recodifique o enviar raw
+                            atob(base64Content), 
                             `Evidencia ${imageName}`
                         );
-                        // La URL será la del raw content o blob de GitHub. 
-                        // Truco: Usar URL pública si es repo público o tokenizado. 
-                        // Para este visor simple, guardaremos el path relativo y trataremos de cargarlo o mantenemos el base64 pequeño en JSON (no recomendado para prod pero util para demo).
-                        // MEJOR OPCIÓN: Guardar el path y en el JSON guardar el path.
-                        imageUrl = path; 
                     }
 
                     // 2. Actualizar JSON DB
                     setStatusMsg('Actualizando base de datos...');
-                    // Primero obtenemos el último SHA para evitar conflictos
-                    const currentFile = await GithubService.getFile(ghConfig.token, ghConfig.owner, ghConfig.repo, 'db/pagos.json');
+                    const currentFile = await GithubService.getJsonFile(ghConfig.token, ghConfig.owner, ghConfig.repo, 'db/pagos.json');
                     const sha = currentFile ? currentFile.sha : null;
                     
-                    // Modificar transaccion con el path de la imagen si se subió una
                     const transactionsToSave = newTransactions.map(t => {
                         if (t.id === (editingId || newTransactions[0].id) && imageName) {
-                            return { ...t, imagePath: `evidencias/${imageName}`, image: null }; // Guardamos path, limpiamos base64 pesado del JSON
+                            return { ...t, imagePath: `evidencias/${imageName}`, image: null }; 
                         }
                         return t;
                     });
@@ -303,11 +306,10 @@
                 if (file) {
                     const reader = new FileReader();
                     reader.onloadend = () => {
-                        // Guardamos todo el DataURL para preview local
                         setFormData(prev => ({ 
                             ...prev, 
                             image: reader.result, 
-                            rawFile: file, // Guardamos ref al archivo para subir nombre
+                            rawFile: file, 
                             fileName: `${Date.now()}_${file.name.replace(/\s/g, '_')}`
                         }));
                     };
@@ -323,7 +325,7 @@
                     id: editingId || Date.now(),
                     ...formData,
                     amount: parseFloat(formData.amount),
-                    rawFile: undefined, // No guardar blob en JSON state
+                    rawFile: undefined, 
                     fileName: undefined
                 };
 
@@ -334,34 +336,41 @@
                     updatedTransactions = [newTransaction, ...transactions];
                 }
 
-                // Guardar localmente primero (optimista)
                 setTransactions(updatedTransactions);
-
-                // Iniciar proceso GitHub
                 await saveToGithub(updatedTransactions, formData.image, formData.fileName);
             };
 
-            // Helper para mostrar imagen (Base64 local o URL GitHub)
-            const getImageUrl = (t) => {
-                if (t.image && t.image.startsWith('data:')) return t.image; // Base64 Legacy/Local
-                if (t.imagePath && ghConfig.owner) {
-                    // Construir URL raw de GitHub (Requiere repo público o token en img src que es complejo, asumimos público o usamos api para fetch blob)
-                    // Para simplificar visualización privada:
-                    return `https://github.com/${ghConfig.owner}/${ghConfig.repo}/blob/main/${t.imagePath}?raw=true`;
+            // Nueva función para manejar la visualización de imagen
+            const handleViewImage = async (t) => {
+                // Caso 1: Imagen local base64 (data:image...)
+                if (t.image && t.image.startsWith('data:')) {
+                    setViewImage(t.image);
+                    return;
                 }
-                return null;
+
+                // Caso 2: Imagen en GitHub (requiere fetch con token)
+                if (t.imagePath && ghConfig.token) {
+                    setViewImage('loading'); // Indicador de carga
+                    setImageLoading(true);
+                    try {
+                        const base64Image = await GithubService.getImage(ghConfig.token, ghConfig.owner, ghConfig.repo, t.imagePath);
+                        setViewImage(base64Image);
+                    } catch (error) {
+                        alert("Error al cargar imagen: " + error.message);
+                        setViewImage(null);
+                    } finally {
+                        setImageLoading(false);
+                    }
+                }
             };
 
-            // ... (Resto de handlers de edición/borrado igual que antes pero llamando a saveToGithub para borrar) ...
-            // Simplificación: Delete solo local por ahora en esta demo, idealmente actualizar JSON en github.
             const handleDelete = async (id) => {
                 if(confirm("¿Eliminar y sincronizar?")) {
                     const updated = transactions.filter(t => t.id !== id);
                     setTransactions(updated);
-                    // Actualizar JSON en github
                     setLoading(true);
                     try {
-                        const currentFile = await GithubService.getFile(ghConfig.token, ghConfig.owner, ghConfig.repo, 'db/pagos.json');
+                        const currentFile = await GithubService.getJsonFile(ghConfig.token, ghConfig.owner, ghConfig.repo, 'db/pagos.json');
                          await GithubService.uploadFile(
                             ghConfig.token, ghConfig.owner, ghConfig.repo, 'db/pagos.json', 
                             JSON.stringify(updated, null, 2), "Eliminar registro", currentFile.sha
@@ -377,7 +386,9 @@
             };
             
             const handleEdit = (t) => {
-                setFormData({ ...t, image: getImageUrl(t) }); // Intentar mostrar preview
+                // Al editar, no descargamos la imagen remota automáticamente para no consumir datos, 
+                // solo si el usuario la quiere cambiar. Mantenemos el reference.
+                setFormData({ ...t, image: t.image || null }); 
                 setEditingId(t.id);
                 setIsFormOpen(true);
             };
@@ -453,7 +464,7 @@
                                                 <span className="text-xs text-gray-400 font-medium">{formatDate(t.date)}</span>
                                                 <div className="flex gap-2">
                                                     {(t.image || t.imagePath) && (
-                                                        <button onClick={() => setViewImage(getImageUrl(t))} className="text-xs text-brand-600 dark:text-brand-400 flex items-center gap-1 hover:bg-brand-50 dark:hover:bg-gray-700 px-2 py-1 rounded-md transition-colors font-medium">
+                                                        <button onClick={() => handleViewImage(t)} className="text-xs text-brand-600 dark:text-brand-400 flex items-center gap-1 hover:bg-brand-50 dark:hover:bg-gray-700 px-2 py-1 rounded-md transition-colors font-medium">
                                                             <IconImage className="w-3.5 h-3.5" /> Ver
                                                         </button>
                                                     )}
@@ -556,8 +567,15 @@
                     {viewImage && (
                         <div className="fixed inset-0 bg-black/95 z-50 flex items-center justify-center p-4 fade-in" onClick={() => setViewImage(null)}>
                             <button className="absolute top-4 right-4 text-white p-2 bg-white/10 rounded-full"><IconX className="w-6 h-6" /></button>
-                            <img src={viewImage} className="max-w-full max-h-[85vh] rounded-lg shadow-2xl" onClick={e => e.stopPropagation()} onError={(e) => { e.target.onerror = null; e.target.src="https://via.placeholder.com/300?text=No+disponible+públicamente"; }} />
-                            <p className="absolute bottom-10 text-white text-xs opacity-70">Si la imagen no carga, verifica que el repo sea público o usa el base64 local.</p>
+                            
+                            {viewImage === 'loading' ? (
+                                <div className="text-white flex flex-col items-center">
+                                    <div className="w-10 h-10 border-4 border-brand-500 border-t-transparent rounded-full spin mb-4"></div>
+                                    <p>Descargando evidencia desde GitHub...</p>
+                                </div>
+                            ) : (
+                                <img src={viewImage} className="max-w-full max-h-[85vh] rounded-lg shadow-2xl" onClick={e => e.stopPropagation()} />
+                            )}
                         </div>
                     )}
                 </div>
