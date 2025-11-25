@@ -88,7 +88,7 @@
                 }
             },
 
-            // Leer Imagen (Evidencia) - Nueva función
+            // Leer Imagen (Evidencia)
             async getImage(token, owner, repo, path) {
                 try {
                     const response = await fetch(`${GITHUB_API_URL}/repos/${owner}/${repo}/contents/${path}`, {
@@ -96,18 +96,33 @@
                     });
                     if (!response.ok) throw new Error("No se pudo cargar la imagen");
                     const data = await response.json();
-                    // data.content viene en base64 con saltos de línea (\n), hay que limpiarlos
+                    
                     const cleanBase64 = data.content.replace(/\n/g, '');
-                    // Asumimos jpeg/png genérico para visualizar
-                    return `data:image/jpeg;base64,${cleanBase64}`; 
+                    
+                    // Determinar extensión para MIME type correcto
+                    const ext = path.split('.').pop().toLowerCase();
+                    const mime = ext === 'png' ? 'image/png' : (ext === 'jpg' || ext === 'jpeg') ? 'image/jpeg' : 'image/jpeg';
+                    
+                    return `data:${mime};base64,${cleanBase64}`; 
                 } catch (e) {
                     console.error("Get image error", e);
                     throw e;
                 }
             },
 
-            async uploadFile(token, owner, repo, path, content, message, sha = null) {
-                const contentBase64 = btoa(unescape(encodeURIComponent(content)));
+            // SUBIDA DE ARCHIVOS CORREGIDA
+            // isBase64: true para imágenes (ya vienen en base64), false para JSON (texto)
+            async uploadFile(token, owner, repo, path, content, message, sha = null, isBase64 = false) {
+                let contentBase64;
+                
+                if (isBase64) {
+                    // Si ya es base64 (imagen), lo usamos directo
+                    contentBase64 = content;
+                } else {
+                    // Si es texto (JSON), lo codificamos a Base64 compatible con UTF-8
+                    contentBase64 = btoa(unescape(encodeURIComponent(content)));
+                }
+
                 const body = { message, content: contentBase64 };
                 if (sha) body.sha = sha;
 
@@ -158,7 +173,7 @@
             const [viewImage, setViewImage] = useState(null);
             const [searchTerm, setSearchTerm] = useState('');
             const [loading, setLoading] = useState(false);
-            const [imageLoading, setImageLoading] = useState(false); // Nuevo estado para carga de imágenes
+            const [imageLoading, setImageLoading] = useState(false);
             const [statusMsg, setStatusMsg] = useState('');
             
             // Configuración GitHub
@@ -222,7 +237,7 @@
                 }
             };
 
-            // Exportar a CSV (Restaurado)
+            // Exportar a CSV
             const exportToCSV = () => {
                 if (transactions.length === 0) {
                     alert("No hay datos para exportar");
@@ -261,16 +276,20 @@
                     // 1. Si hay imagen nueva, subirla a evidencias/
                     if (imageFile) {
                         setStatusMsg('Subiendo evidencia...');
+                        // Extraemos la parte Base64 pura (después de "data:image/png;base64,")
                         const base64Content = imageFile.split(',')[1]; 
                         const path = `evidencias/${imageName}`;
                         
+                        // CORRECCIÓN IMPORTANTE: Subir como Base64 directo
                         await GithubService.uploadFile(
                             ghConfig.token, 
                             ghConfig.owner, 
                             ghConfig.repo, 
                             path, 
-                            atob(base64Content), 
-                            `Evidencia ${imageName}`
+                            base64Content, // Enviamos el string Base64 limpio directamente
+                            `Evidencia ${imageName}`,
+                            null,
+                            true // Flag para indicar que NO se debe recodificar
                         );
                     }
 
@@ -293,7 +312,8 @@
                         'db/pagos.json', 
                         JSON.stringify(transactionsToSave, null, 2), 
                         `Registro de pago ${new Date().toISOString()}`,
-                        sha
+                        sha,
+                        false // Es JSON (texto), usar codificación normal
                     );
 
                     setTransactions(transactionsToSave);
